@@ -1,0 +1,7 @@
+build/
+out/
+corpus/
+bench/sources/
+bench/.work/
+.git/
+*.caffemodel
