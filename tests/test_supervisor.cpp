@@ -76,6 +76,7 @@ TEST(Supervisor, IsolatesCrashesHangsAndBadInputs) {
 }
 
 TEST(Supervisor, MemoryLimitTurnsBombIntoCleanFailure) {
+  if (kAddressSanitizer) GTEST_SKIP() << "RLIMIT_AS is not applied under AddressSanitizer";
   PoolConfig c = config(1);
   c.worker_mem_mb = 1024;
   c.max_attempts = 1;
@@ -124,7 +125,10 @@ TEST(Supervisor, GracefulStopDrainsRunningAndCancelsQueued) {
   std::vector<uint64_t> ids;
   for (int i = 0; i < 6; ++i) ids.push_back(*sup.submit({"chaos://sleep/400"}));
   std::thread stopper([&] {
-    std::this_thread::sleep_for(200ms);  // workers have picked up the first two jobs
+    // Stop once both workers have picked up a job (slow to start under sanitizers).
+    const auto give_up = std::chrono::steady_clock::now() + 30s;
+    while (sup.stats().running < 2 && std::chrono::steady_clock::now() < give_up)
+      std::this_thread::sleep_for(5ms);
     sup.request_stop();
   });
   sup.run(/*exit_when_idle=*/false);

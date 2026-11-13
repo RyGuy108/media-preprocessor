@@ -33,6 +33,20 @@
 
 namespace mhprep {
 
+// AddressSanitizer reserves terabytes of virtual address space for its shadow memory, so
+// it can't run under RLIMIT_AS. In sanitizer builds the worker memory cap is not applied.
+#if defined(__SANITIZE_ADDRESS__)
+inline constexpr bool kAddressSanitizer = true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+inline constexpr bool kAddressSanitizer = true;
+#else
+inline constexpr bool kAddressSanitizer = false;
+#endif
+#else
+inline constexpr bool kAddressSanitizer = false;
+#endif
+
 struct PoolConfig {
   int workers = 4;
   std::string worker_bin;  // path to the mhprep binary (exec'd as `mhprep worker`)

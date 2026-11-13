@@ -100,7 +100,7 @@ nlohmann::json handle_chaos_input(const std::string& input) {
 int worker_main(int fd, const std::string& models_dir, size_t mem_mb) {
   ::prctl(PR_SET_PDEATHSIG, SIGKILL);  // never outlive the supervisor
   if (::getppid() == 1) return 1;
-  if (mem_mb > 0) {
+  if (mem_mb > 0 && !kAddressSanitizer) {
     rlimit lim{mem_mb << 20, mem_mb << 20};
     ::setrlimit(RLIMIT_AS, &lim);
   }
