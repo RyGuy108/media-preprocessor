@@ -51,6 +51,7 @@ struct Scene {
   double start_sec = 0, end_sec = 0;
   int keyframe = -1;  // index into Manifest::assets
   std::vector<int> faces;
+  std::string transition;  // how the scene was entered: cut | dissolve | fade ("" for the first)
 };
 
 struct Timing {

@@ -8,6 +8,10 @@ very sensitive threshold) considers a single shot, so a source's internal cuts d
 into the ground truth. About 20% of segments repeat an earlier segment of the same video
 (shot / reverse-shot, recaps): those keyframes are true duplicates.
 
+Gradual transitions (--gradual P): a fraction P of boundaries become a dissolve or a fade
+through black, 15-45 frames (0.5-1.5 s) long, made by blending the end of one segment into the start
+of the next. Their ground truth is the frame interval the blend covers.
+
 Images: originals plus near-duplicate variants (re-encoded, resized, cropped, brightened,
 burst frames). Ground truth = which images belong to the same group.
 
@@ -91,6 +95,22 @@ def extract_frames(src: str, start: float, n: int, w: int, h: int) -> bytes:
     return raw[: n * w * h * 3]
 
 
+def blend(a: np.ndarray, b: np.ndarray, kind: str) -> np.ndarray:
+    """L frames of transition from the tail of shot A (a) to the head of shot B (b)."""
+    n = len(a)
+    out = np.empty_like(a)
+    for j in range(n):
+        t = (j + 1) / (n + 1)
+        if kind == "dissolve":
+            f = (1 - t) * a[j].astype(np.float32) + t * b[j].astype(np.float32)
+        elif t < 0.5:  # fade: A down to black, then B up from black
+            f = (1 - 2 * t) * a[j].astype(np.float32)
+        else:
+            f = (2 * t - 1) * b[j].astype(np.float32)
+        out[j] = np.clip(f + 0.5, 0, 255).astype(np.uint8)
+    return out
+
+
 def build_video(task: dict) -> dict:
     w, h, fps = task["width"], task["height"], 30
     enc = subprocess.Popen(
@@ -99,18 +119,48 @@ def build_video(task: dict) -> dict:
          "-pix_fmt", "yuv420p", "-threads", "1", task["out"]],
         stdin=subprocess.PIPE)
     frame = 0
+    held = None  # tail of the previous segment, kept back to blend into the next one
+    transitions = []
     for seg in task["segments"]:
-        enc.stdin.write(extract_frames(seg["source"], seg["start"], seg["frames"], w, h))
-        seg["start_frame"] = frame
-        frame += seg["frames"]
+        raw = extract_frames(seg["source"], seg["start"], seg["frames"], w, h)
+        frames = np.frombuffer(raw, np.uint8).reshape(seg["frames"], h, w, 3)
+        tr = seg.get("transition")  # how this segment is entered: None = hard cut
+        if tr and held is not None:
+            n = len(held)
+            enc.stdin.write(blend(held, frames[:n], tr).tobytes())
+            transitions.append({"kind": tr, "start": frame, "end": frame + n - 1})
+            seg["start_frame"] = frame
+            frame += n
+            frames = frames[n:]
+        else:
+            if held is not None:
+                enc.stdin.write(held.tobytes())
+                frame += len(held)
+            seg["start_frame"] = frame
+        hold = seg.get("hold", 0)  # frames reserved for the next segment's transition
+        body = frames[: len(frames) - hold] if hold else frames
+        enc.stdin.write(body.tobytes())
+        frame += len(body)
+        held = frames[len(frames) - hold:] if hold else None
+    if held is not None:
+        enc.stdin.write(held.tobytes())
+        frame += len(held)
     enc.stdin.close()
     enc.wait()
+    # A cut's ground truth is an interval: [f, f] for a hard cut, the blend for a transition.
+    by_start = {t["start"]: t for t in transitions}
+    cut_intervals = []
+    for s in task["segments"][1:]:
+        t = by_start.get(s["start_frame"])
+        cut_intervals.append([t["start"], t["end"]] if t else [s["start_frame"], s["start_frame"]])
     cuts = [s["start_frame"] for s in task["segments"][1:]]
     return {"video": task["out"], "width": w, "height": h, "fps": fps, "frames": frame,
-            "cuts": cuts, "segments": task["segments"]}
+            "cuts": cuts, "cut_intervals": cut_intervals, "transitions": transitions,
+            "segments": task["segments"]}
 
 
-def plan_videos(sources: list[dict], n: int, rng: random.Random, out: Path) -> list[dict]:
+def plan_videos(sources: list[dict], n: int, rng: random.Random, out: Path,
+                gradual: float = 0.0) -> list[dict]:
     pool = [(si, ii) for si, s in enumerate(sources) for ii, _ in enumerate(s["intervals"])]
     tasks = []
     for v in range(n):
@@ -137,6 +187,16 @@ def plan_videos(sources: list[dict], n: int, rng: random.Random, out: Path) -> l
                    "key": (si, ii), "group": f"{si}:{ii}:{start:.3f}"}
             segs.append(seg)
             last_key = (si, ii)
+        segs = [dict(s) for s in segs]  # repeats were shallow copies; give each its own
+        if gradual > 0:
+            # Own RNG stream for transition choices.
+            trng = random.Random(rng.random())
+            for prev, s in zip(segs, segs[1:]):
+                if trng.random() < gradual:
+                    n_tr = trng.randint(15, 45)
+                    if n_tr * 2 <= min(prev["frames"], s["frames"]):
+                        s["transition"] = "dissolve" if trng.random() < 0.6 else "fade"
+                        prev["hold"] = n_tr
         for s in segs:
             s["key"] = list(s["key"])
         tasks.append({"out": str(out / "videos" / f"v{v:03d}.mp4"), "width": width,
@@ -217,6 +277,9 @@ def main():
     ap.add_argument("--videos", type=int, default=48)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--frames-per-source", type=int, default=3)
+    ap.add_argument("--gradual", type=float, default=0.0,
+                    help="fraction of boundaries that are dissolves or fades")
+    ap.add_argument("--no-images", action="store_true")
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     a = ap.parse_args()
     src, out = Path(a.sources), Path(a.out)
@@ -224,17 +287,19 @@ def main():
     rng = random.Random(a.seed)
     print("analysing sources ...")
     sources = analyse_sources(src)
-    tasks = plan_videos(sources, a.videos, rng, out)
+    tasks = plan_videos(sources, a.videos, rng, out, a.gradual)
     print(f"encoding {len(tasks)} videos ...")
     with ProcessPoolExecutor(a.jobs) as ex:
         videos = list(ex.map(build_video, tasks))
-    images = build_images(sources, src, rng, out, a.frames_per_source)
+    images = {"images": []} if a.no_images else build_images(sources, src, rng, out,
+                                                                a.frames_per_source)
     truth = {"seed": a.seed, "videos": videos, **images}
     (out / "truth.json").write_text(json.dumps(truth, indent=1))
     nf = sum(v["frames"] for v in videos)
     ngroups = len({i["group"] for i in images["images"]})
     print(f"done: {len(videos)} videos, {nf} frames ({nf / 30 / 60:.1f} min), "
-          f"{sum(len(v['cuts']) for v in videos)} cuts; {len(images['images'])} images in "
+          f"{sum(len(v['cuts']) for v in videos)} cuts "
+          f"({sum(len(v['transitions']) for v in videos)} gradual); {len(images['images'])} images in "
           f"{ngroups} groups")
 
 

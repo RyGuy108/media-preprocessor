@@ -179,6 +179,7 @@ Manifest Pipeline::process_video(const std::string& input, const std::string& ou
     cv::Mat img;
   } best;
   int64_t scene_start = 0, last_frame = -1;
+  std::string scene_transition;
   int analyzed_in_scene = 0;
   const int kf_phase = opts.keyframe_every / 2;
   const bool dense = !src->sparse();
@@ -190,6 +191,7 @@ Manifest Pipeline::process_video(const std::string& input, const std::string& ou
     s.end_frame = end_frame;
     s.start_sec = scene_start / fps;
     s.end_sec = (end_frame + 1) / fps;
+    s.transition = scene_transition;
     if (!best.img.empty()) {
       Asset a;
       a.kind = "keyframe";
@@ -241,9 +243,12 @@ Manifest Pipeline::process_video(const std::string& input, const std::string& ou
       m.timing.analyze_ms += ms_since(t0);
       finish_scene(idx - 1);
       scene_start = idx;
+      scene_transition = to_string(det.last_cut_kind());
       t0 = Clock::now();
     }
-    const bool probe = (analyzed_in_scene % opts.keyframe_every) == kf_phase || best.img.empty();
+    // Blended frames mid-transition make poor keyframes; skip them unless there's nothing else.
+    const bool probe = best.img.empty() || ((analyzed_in_scene % opts.keyframe_every) == kf_phase &&
+                                            !det.in_transition());
     if (probe) {
       const double sh = sharpness(src->small());
       if (sh > best.sharp) {
@@ -302,7 +307,8 @@ nlohmann::json to_json(const Manifest& m) {
                       {"start_sec", s.start_sec},
                       {"end_sec", s.end_sec},
                       {"keyframe", s.keyframe},
-                      {"faces", s.faces}});
+                      {"faces", s.faces},
+                      {"transition", s.transition.empty() ? json(nullptr) : json(s.transition)}});
   return json{
       {"input", m.input},
       {"kind", m.kind},
@@ -338,6 +344,10 @@ PipelineOptions options_from_json(const nlohmann::json& j, PipelineOptions o) {
   o.write_assets = j.value("write_assets", o.write_assets);
   o.scene.min_score = j.value("scene_min_score", o.scene.min_score);
   o.scene.ratio = j.value("scene_ratio", o.scene.ratio);
+  o.scene.gradual = j.value("scene_gradual", o.scene.gradual);
+  o.scene.gradual_min_delta = j.value("gradual_min_delta", o.scene.gradual_min_delta);
+  o.scene.gradual_max_residual = j.value("gradual_max_residual", o.scene.gradual_max_residual);
+  o.scene.gradual_window_sec = j.value("gradual_window_sec", o.scene.gradual_window_sec);
   o.scene.analysis_width = j.value("analysis_width", o.scene.analysis_width);
   o.source.analysis_width = o.scene.analysis_width;
   return o;

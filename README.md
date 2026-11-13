@@ -90,6 +90,21 @@ The semantics are deliberate:
 - **One supervisor per database.** A session-level advisory lock is held on its own connection, so a second supervisor fails at startup instead of double-running recovered jobs. Postgres releases the lock automatically if the holder dies.
 - **Evicted records are still served.** `GET /v1/jobs/{id}` falls back to Postgres for jobs no longer held in memory.
 
+### Dissolves and fades (`"scene_gradual": true`, `results/gradual.json`)
+
+A dissolve changes each frame by only a few levels, so the per-frame cut test never fires on a slow one. A second test looks at the last 0.4 s, and the last 0.8 s for long transitions. It checks whether the window's endpoints differ a lot *and* every frame in between sits on the straight line from one endpoint to the other. Pixelwise linear interpolation is exactly what a dissolve is. Camera motion moves content rather than blending it, so its middle frames fall far off that line, and a hard cut inside the window is a step, not a ramp. A fade through black is two ramps, and is reported as one cut when the picture comes back.
+
+The ground truth for this comes from `make_corpus.py --gradual 0.5`, which blends shot ends into 15–45-frame (0.5–1.5 s) dissolves and fades, so the frame interval of every transition is known. Thresholds were tuned on a 16-video dev set and scored once on a 48-video held-out set:
+
+| Held-out, 426 cuts | Hard cuts (363) | Dissolves (40) | Fades (23) | Precision | F1 |
+|---|---|---|---|---|---|
+| Cut test only | 355 | 25 | 23 | 0.981 | 0.963 |
+| + gradual test | 354 | **33** | 22 | 0.976 | **0.968** |
+
+Dissolve recall rises from 63% to 83%, at no measurable speed cost (29.3 s vs 29.4 s on the main corpus). Fades were already caught, because a fade to black changes the picture fast enough for the per-frame test.
+
+The test is **off by default** for two reasons. On the hard-cut-only corpus it costs a little (F1 0.979 → 0.972, 5 more false cuts, from slow, smooth camera moves that look like ramps). And it misses dissolves between moving shots: motion during the blend pulls the middle frames off the line. A 1.5 s dissolve between similar-looking shots is also too gentle to clear the threshold. Turn it on for edited content where dissolves are common.
+
 ### What reaches the API
 
 On the main C++ run, 326 MB of video became 72 MB of JPEG keyframes and face crops (4.5× fewer bytes), and 333 API-ready face crops came out. Within individual videos, 96 repeated-shot keyframes were flagged as duplicates (precision 0.93). Across uploads, 60 of 171 images were flagged as duplicates of an earlier upload from the same tenant (94% precision). The corpus deliberately reuses ~35 source clips, so its cross-upload duplicate rate is higher than real traffic; `results/throughput.json` shows the split.
@@ -127,6 +142,7 @@ Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool):
 - **Process hygiene.** Workers are exec'd, not forked from a multithreaded process, and get a clean signal mask through `posix_spawnattr`. They run in their own process group, so Ctrl-C drains the supervisor instead of killing jobs mid-write, and `PR_SET_PDEATHSIG` stops them from outliving the supervisor. On SIGTERM the server stops accepting work, cancels queued jobs, lets running jobs finish (up to `--drain-ms`), then closes sockets and reaps.
 - **Dedup that doesn't eat distinct outputs.** pHash alone flagged 23 false duplicates on the dev set. Most were the same model in different try-on outfits: same structure, different colours. Every BK-tree candidate within Hamming 8 is now verified against a 4×4 CIELAB colour layout, with the mean-L shift removed so exposure changes still match. That took false duplicates from 23 to 5 at nearly the same recall (85 vs 86 of 95 true pairs).
 - **Durable without slowing the loop.** The epoll loop never waits on Postgres. Only `submit()` blocks, on an HTTP thread, until its row commits. Every state change is queued to one writer thread that group-commits through a libpq pipeline. The details are under *Durability*.
+- **Dissolves without a model.** Gradual transitions are found by testing whether recent frames are a pixelwise linear blend of the window's endpoints, which separates blends from camera motion. The bookkeeping stops one transition turning into two cuts: a re-arm rule after every cut, and fade-out/fade-in pairing through black frames. The details are under *Dissolves and fades*.
 - **Ground truth you can trust.** Corpus videos are assembled from segments whose cut points I placed, so cuts are known to the frame. Segments come only from intervals that ffmpeg's own `scdet` (threshold 3) considers a single shot. Thresholds were tuned on a separate dev corpus (seed 7) and reported on the test corpus (seed 1).
 
 ## Usage
@@ -134,7 +150,7 @@ Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool):
 ```bash
 scripts/fetch_models.sh                    # ResNet-10 SSD face model (5 MB)
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
-(cd build && ctest)                        # 35 GoogleTest tests
+(cd build && ctest)                        # 40 GoogleTest tests
 # The 10 job-store tests need Postgres; without it they're skipped:
 MHPREP_TEST_PG="host=localhost user=postgres dbname=mhprep_test" ctest --test-dir build
 
@@ -155,7 +171,7 @@ build/mhprep serve --port 8080 --db "host=localhost dbname=mhprep user=mhprep"
 build/mhprep process clip.mp4 --options '{"backend":"opencv","faces":false}'
 ```
 
-Per-job options: `backend` (`ffmpeg`|`opencv`), `skip_nonref`, `stride`, `faces`, `face_size`, `dup_radius`, `color_tolerance`, `scene_min_score`, `scene_ratio`, `io_timeout_ms`, `timeout_ms`, `write_assets`.
+Per-job options: `backend` (`ffmpeg`|`opencv`), `skip_nonref`, `stride`, `faces`, `face_size`, `dup_radius`, `color_tolerance`, `scene_min_score`, `scene_ratio`, `scene_gradual`, `gradual_min_delta`, `gradual_max_residual`, `gradual_window_sec`, `io_timeout_ms`, `timeout_ms`, `write_assets`.
 
 The Docker image builds and runs the tests in the build stage, and the runtime image uses `tini` so `docker stop` triggers a graceful drain. I couldn't build it in the dev environment I used, because it had no Docker daemon.
 
@@ -166,6 +182,8 @@ The Docker image builds and runs the tests in the build stage, and the runtime i
 # Magic Hour generations from earlier projects, in bench/sources/{videos,images}.
 python bench/make_corpus.py --out corpus/dev  --seed 7 --videos 16   # tuning
 python bench/make_corpus.py --out corpus/test --seed 1 --videos 48   # reporting
+python bench/make_corpus.py --out corpus/gradual-dev  --seed 7 --videos 16 --gradual 0.5 --no-images
+python bench/make_corpus.py --out corpus/gradual-test --seed 1 --videos 48 --gradual 0.5 --no-images
 python bench/run_bench.py && python bench/plot.py
 ```
 
@@ -186,6 +204,6 @@ results/          benchmark output
 
 - The durable store keeps every job row forever. A retention job (or partitioning by `submitted_at`) is needed before long-running production use.
 - One supervisor per database. Scaling out means sharding tenants across supervisors, or moving to `SELECT ... FOR UPDATE SKIP LOCKED` dispatch so several supervisors can share a queue.
-- Fades and dissolves aren't modelled; the detector is tuned for hard cuts.
+- Gradual-transition detection (opt-in) misses dissolves between moving shots. A motion-compensated version of the linearity test, or a learned boundary model, would be the next step.
 - Face crops aren't deduplicated across uploads, because the same person in two photos is usually a different, wanted crop.
 - Next integration: post each manifest's unique keyframes and face crops as jobs to the render orchestrator.
