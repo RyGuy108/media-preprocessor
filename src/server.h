@@ -15,6 +15,9 @@ namespace mhprep {
 //   GET  /healthz, GET /metrics (Prometheus)
 class HttpServer {
  public:
+  static constexpr int kListenBacklog = 4096;  // capped by net.core.somaxconn
+  static constexpr size_t kMinHttpThreads = 16;
+  static constexpr size_t kMaxHttpThreads = 4096;  // ~ max concurrent client connections
   explicit HttpServer(Supervisor& sup);
   ~HttpServer();
   bool start(const std::string& host, int port);  // binds, then serves on a background thread
