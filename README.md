@@ -69,13 +69,34 @@ The first version managed 580 req/s, with p90 latency at 135 ms. cpp-httplib pin
 
 The benchmark also caught a shutdown hang. On SIGTERM, a helper thread and the main thread both called `HttpServer::stop()`, and two threads joining one `std::thread` is undefined behaviour; here it hung. Now `on_stop` only calls the non-blocking `shutdown()`, and joining is serialized.
 
+### Durability (`--db`, Postgres)
+
+With `--db` set, every job is committed to Postgres before `POST /v1/jobs` returns 202, and a restarted supervisor resumes whatever was queued or running.
+
+| Test | Result |
+|---|---|
+| `kill -9` the supervisor with 40 jobs submitted (16 done, 4 on workers, 20 queued) | Workers exit with it (`PR_SET_PDEATHSIG`). On restart all 24 unfinished jobs resume, and 40/40 succeed. |
+| Durable submit throughput, `wrk -t4 -c64 -d10s` POST-only | 5.3k req/s · p50 11 ms · p99 27 ms |
+| Same, one commit per write instead of group commit | 383 req/s · p50 164 ms · p99 253 ms |
+
+One commit per job is slow because each one waits for its own WAL flush. A single writer thread takes every write queued since its last commit, which is about 90 at this load. It sends them as one libpq pipeline in one implicit transaction, so a batch costs one round trip and one fsync. That is 13.8× the throughput. Pipelining alone took it from 2.2k to 5.3k req/s, because a 90-statement batch had been spending most of its time on round trips.
+
+The semantics are deliberate:
+
+- **A 202 means durable.** The insert commits before the job enters the in-memory queue, so nothing can dispatch it ahead of its own row. If the store can't commit within 5 s the API answers 503, and the row is guaranteed not to exist. A queued insert is withdrawn, and a failed batch is never retried behind the caller's back.
+- **At-least-once.** Started, retried and finished states are written behind on the same thread, in order. If the process dies first, the job is still `queued` or `running` in Postgres and runs again. Its output directory is keyed by job id, so a rerun overwrites rather than duplicates. An attempt interrupted by a crash or a drain deadline is logged but doesn't count toward quarantine.
+- **Graceful stop doesn't cancel.** In memory-only mode SIGTERM fails queued jobs. In durable mode they stay queued for the next start.
+- **Cross-upload dedup survives restarts.** Each new unique keyframe or image hash is stored with its job, and the per-tenant BK-trees are rebuilt at startup.
+- **One supervisor per database.** A session-level advisory lock is held on its own connection, so a second supervisor fails at startup instead of double-running recovered jobs. Postgres releases the lock automatically if the holder dies.
+- **Evicted records are still served.** `GET /v1/jobs/{id}` falls back to Postgres for jobs no longer held in memory.
+
 ### What reaches the API
 
 On the main C++ run, 326 MB of video became 72 MB of JPEG keyframes and face crops (4.5× fewer bytes), and 333 API-ready face crops came out. Within individual videos, 96 repeated-shot keyframes were flagged as duplicates (precision 0.93). Across uploads, 60 of 171 images were flagged as duplicates of an earlier upload from the same tenant (94% precision). The corpus deliberately reuses ~35 source clips, so its cross-upload duplicate rate is higher than real traffic; `results/throughput.json` shows the split.
 
 ## Resume bullet
 
-> Built a C++20 media preprocessing service (OpenCV, FFmpeg libavcodec, Linux epoll/signalfd/timerfd, multi-process worker pool) that splits uploads into scenes, extracts keyframes and face crops, and removes near-duplicates before they hit a generative-media API. It runs at 48× realtime on 4 cores, 1.6–1.9× a Python implementation of the same algorithm at identical accuracy (scene-cut F1 0.98 on 434 labelled cuts). It completed 100% of valid jobs under injected segfaults, hangs and stalled URLs vs 13% for a Python process pool, and serves 90k req/s at p99 4.6 ms with every worker saturated.
+> Built a C++20 media preprocessing service (OpenCV, FFmpeg libavcodec, Linux epoll/signalfd/timerfd, multi-process worker pool) that splits uploads into scenes, extracts keyframes and face crops, and removes near-duplicates before they hit a generative-media API. It runs at 48× realtime on 4 cores, 1.6–1.9× a Python implementation of the same algorithm at identical accuracy (scene-cut F1 0.98 on 434 labelled cuts). It completed 100% of valid jobs under injected segfaults, hangs and stalled URLs vs 13% for a Python process pool, and serves 90k req/s at p99 4.6 ms with every worker saturated. Jobs are durable in Postgres and survive `kill -9`; group commit over a libpq pipeline sustains 5.3k durable submits/s, 13.8× committing each write on its own.
 
 Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool): 48× realtime, 1.6–1.9× faster than Python at equal accuracy, 100% vs 13% job completion under injected crashes and hangs, 90k req/s at p99 4.6 ms."*
 
@@ -105,6 +126,7 @@ Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool):
 - **Memory bombs.** Each worker runs under `RLIMIT_AS`, so a decompression bomb ends in `bad_alloc` inside that worker (reported as `oom`) rather than the kernel OOM killer picking a victim.
 - **Process hygiene.** Workers are exec'd, not forked from a multithreaded process, and get a clean signal mask through `posix_spawnattr`. They run in their own process group, so Ctrl-C drains the supervisor instead of killing jobs mid-write, and `PR_SET_PDEATHSIG` stops them from outliving the supervisor. On SIGTERM the server stops accepting work, cancels queued jobs, lets running jobs finish (up to `--drain-ms`), then closes sockets and reaps.
 - **Dedup that doesn't eat distinct outputs.** pHash alone flagged 23 false duplicates on the dev set. Most were the same model in different try-on outfits: same structure, different colours. Every BK-tree candidate within Hamming 8 is now verified against a 4×4 CIELAB colour layout, with the mean-L shift removed so exposure changes still match. That took false duplicates from 23 to 5 at nearly the same recall (85 vs 86 of 95 true pairs).
+- **Durable without slowing the loop.** The epoll loop never waits on Postgres. Only `submit()` blocks, on an HTTP thread, until its row commits. Every state change is queued to one writer thread that group-commits through a libpq pipeline. The details are under *Durability*.
 - **Ground truth you can trust.** Corpus videos are assembled from segments whose cut points I placed, so cuts are known to the frame. Segments come only from intervals that ffmpeg's own `scdet` (threshold 3) considers a single shot. Thresholds were tuned on a separate dev corpus (seed 7) and reported on the test corpus (seed 1).
 
 ## Usage
@@ -112,7 +134,9 @@ Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool):
 ```bash
 scripts/fetch_models.sh                    # ResNet-10 SSD face model (5 MB)
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
-(cd build && ctest)                        # 25 GoogleTest tests
+(cd build && ctest)                        # 35 GoogleTest tests
+# The 10 job-store tests need Postgres; without it they're skipped:
+MHPREP_TEST_PG="host=localhost user=postgres dbname=mhprep_test" ctest --test-dir build
 
 # Batch
 build/mhprep run --workers 8 --out out/ upload1.mp4 photo.jpg https://cdn.example.com/clip.mp4
@@ -123,6 +147,9 @@ build/mhprep serve --port 8080 --workers 8 --timeout-ms 120000 --mem-mb 3072
 curl -XPOST localhost:8080/v1/jobs -d '{"input":"/data/clip.mp4","tenant":"acme"}'
 curl 'localhost:8080/v1/jobs/1?wait_ms=30000'      # long-poll until done; returns the manifest
 curl localhost:8080/metrics                         # Prometheus
+
+# Durable: jobs survive a restart (or MHPREP_DB=...)
+build/mhprep serve --port 8080 --db "host=localhost dbname=mhprep user=mhprep"
 
 # One file, in process (debugging)
 build/mhprep process clip.mp4 --options '{"backend":"opencv","faces":false}'
@@ -146,17 +173,19 @@ python bench/run_bench.py && python bench/plot.py
 
 ```
 include/mhprep/   phash, hash_index (BK-tree + verified DupIndex), scene, faces, video_source,
-                  pipeline, ipc (framing), supervisor, metrics
+                  pipeline, ipc (framing), supervisor, job_store (Postgres), metrics
 src/              implementations + main.cpp (CLI) + server.cpp (HTTP) + worker.cpp (+ chaos hooks)
 tests/            GoogleTest: hashing, BK-tree vs brute force, scene detector, framing under every
-                  split point, pipeline on both backends, supervisor crash/hang/OOM/retry/drain/dedup
+                  split point, pipeline on both backends, supervisor crash/hang/OOM/retry/drain/dedup,
+                  job store recovery/eviction/dedup-after-restart/group commit
 bench/            corpus builder, Python baseline, evaluator, chaos + stall server, wrk script, plots
 results/          benchmark output
 ```
 
 ## Limits and next steps
 
-- Job state is in memory. Finished records are bounded and evicted, but they don't survive a restart. The render orchestrator's Postgres outbox pattern is the natural next step.
+- The durable store keeps every job row forever. A retention job (or partitioning by `submitted_at`) is needed before long-running production use.
+- One supervisor per database. Scaling out means sharding tenants across supervisors, or moving to `SELECT ... FOR UPDATE SKIP LOCKED` dispatch so several supervisors can share a queue.
 - Fades and dissolves aren't modelled; the detector is tuned for hard cuts.
 - Face crops aren't deduplicated across uploads, because the same person in two photos is usually a different, wanted crop.
 - Next integration: post each manifest's unique keyframes and face crops as jobs to the render orchestrator.

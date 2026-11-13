@@ -9,6 +9,15 @@ jobs:
   build-test:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mhprep_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 20
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +35,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config \
             libopencv-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev \
-            nlohmann-json3-dev libcpp-httplib-dev libgtest-dev
+            nlohmann-json3-dev libcpp-httplib-dev libgtest-dev libpq-dev
 
       - name: Cache face detector model
         uses: actions/cache@v4
@@ -48,4 +57,5 @@ jobs:
           # Workers are separate processes; keep sanitizer reports from them in the log.
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          MHPREP_TEST_PG: host=localhost user=postgres password=postgres dbname=mhprep_test
         run: ctest --test-dir build --output-on-failure --timeout 300

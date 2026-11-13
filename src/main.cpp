@@ -89,6 +89,9 @@ PoolConfig pool_config(const Args& a) {
   c.dup_radius = static_cast<int>(a.num("dup-radius", kDupHammingRadius));
   c.color_tolerance = static_cast<int>(a.num("color-tolerance", kDupColorTolerance));
   c.drain_timeout = std::chrono::milliseconds(a.num("drain-ms", 30000));
+  c.db = a.get("db");
+  if (c.db.empty())
+    if (const char* env = std::getenv("MHPREP_DB")) c.db = env;
   if (auto o = a.get("options"); !o.empty()) c.default_options = json::parse(o);
   return c;
 }
@@ -190,6 +193,9 @@ int cmd_serve(const Args& a) {
   sup.on_stop = [&] { http.shutdown(); };
   std::fprintf(stderr, "mhprep: %d workers, listening on %s:%d (models: %s)\n", cfg.workers,
                host.c_str(), port, cfg.models_dir.c_str());
+  if (sup.durable())
+    std::fprintf(stderr, "mhprep: durable job store; resumed %llu unfinished jobs\n",
+                 static_cast<unsigned long long>(sup.stats().recovered));
   sup.run(/*exit_when_idle=*/false);
   http.stop();
   std::fprintf(stderr, "mhprep: drained, bye\n");
@@ -227,6 +233,7 @@ int main(int argc, char** argv) {
   }
   std::cerr << "usage: mhprep run|serve|process [flags] ...\n"
                "  pool flags: --workers N --timeout-ms MS --max-attempts N --mem-mb MB\n"
-               "              --out DIR --options JSON --dup-radius N --no-cross-dedup\n";
+               "              --out DIR --options JSON --dup-radius N --no-cross-dedup\n"
+               "              --db CONNINFO (or MHPREP_DB): keep job state in Postgres\n";
   return 2;
 }

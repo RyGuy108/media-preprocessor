@@ -3,7 +3,7 @@ FROM ubuntu:24.04 AS build
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config ca-certificates curl \
       libopencv-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev \
-      nlohmann-json3-dev libcpp-httplib-dev libgtest-dev \
+      nlohmann-json3-dev libcpp-httplib-dev libgtest-dev libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
@@ -16,7 +16,7 @@ FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libopencv-core406t64 libopencv-imgproc406t64 libopencv-imgcodecs406t64 \
       libopencv-videoio406t64 libopencv-dnn406t64 libcpp-httplib0.14t64 \
-      libavformat60 libavcodec60 libswscale7 libavutil58 tini \
+      libavformat60 libavcodec60 libswscale7 libavutil58 libpq5 tini \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/mhprep /usr/local/bin/mhprep
 COPY --from=build /src/models /usr/local/share/mhprep/models
