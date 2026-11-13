@@ -63,8 +63,14 @@ if(MHPREP_BUILD_TESTS)
     tests/test_pipeline.cpp
     tests/test_supervisor.cpp
     tests/test_job_store.cpp
+    tests/test_server.cpp
+    src/server.cpp
   )
+  target_include_directories(mhprep_tests PRIVATE ${HTTPLIB_INCLUDE_DIR})
   target_link_libraries(mhprep_tests PRIVATE mhprep_core GTest::gtest_main)
+  if(HTTPLIB_FOUND)
+    target_link_libraries(mhprep_tests PRIVATE PkgConfig::HTTPLIB)
+  endif()
   target_compile_definitions(mhprep_tests PRIVATE
     MHPREP_BIN="$<TARGET_FILE:mhprep>"
     MHPREP_MODELS="${CMAKE_SOURCE_DIR}/models")

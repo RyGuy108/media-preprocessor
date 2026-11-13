@@ -1,6 +1,6 @@
 # mhprep: media preprocessing service for the Magic Hour API
 
-C++20 service that turns raw user uploads into the few files worth sending to a generative-media API. It splits videos into scenes, picks one sharp keyframe per scene, crops faces, and drops near-duplicate shots and re-uploads. On a 17-minute held-out corpus with 434 ground-truth cuts it runs at **48× realtime on 4 cores, 1.6× a tuned Python implementation of the same algorithm and 1.9× a typical one, with identical accuracy** (scene-cut F1 0.98). Under injected crashes, hangs and stalled URLs it **finished 100% of valid jobs, while the Python pool finished 13%**. Its API serves **90k req/s at p99 4.6 ms with every worker saturated**.
+C++20 service that turns raw user uploads into the few files worth sending to a generative-media API. It splits videos into scenes, picks one sharp keyframe per scene, crops faces, and drops near-duplicate shots and re-uploads. On a 17-minute held-out corpus with 434 ground-truth cuts it runs at **48× realtime on 4 cores, 1.6× a tuned Python implementation of the same algorithm and 1.9× a typical one, with identical accuracy** (scene-cut F1 0.98). Under injected crashes, hangs and stalled URLs it **finished 100% of valid jobs, while the Python pool finished 13%**. Its API serves **84k req/s with p99.9 under 10 ms at 64–256 concurrent clients, with every worker saturated**.
 
 **Stack:** C++20, CMake, Linux/POSIX (posix_spawn, epoll, signalfd, timerfd, eventfd, rlimits), OpenCV 4.6 (DNN, imgproc), FFmpeg libavcodec/libavformat/libswscale, cpp-httplib, nlohmann/json, GoogleTest, Docker. The benchmark harness and Python baseline are Python 3 + OpenCV.
 
@@ -53,17 +53,28 @@ The fault-injected run uses the same corpus plus 7 bad inputs: 3 URLs whose serv
 
 The C++ wall time is dominated by the 20 s job deadline, which the stalled URLs hit 3 times each. This is a deliberately long deadline. A production setting would also use the FFmpeg I/O timeout (`io_timeout_ms`), which turns a stall into an immediate input error.
 
-### HTTP API (`results/http.json`)
+### HTTP API (`results/http_tail.json`)
 
-The load is `wrk -t2 -c64 -d20s`: 99.8% `GET /v1/jobs/{id}` and 0.2% `POST /v1/jobs`, while all 4 workers are busy decoding a 144-video backlog.
+The load is `wrk -t2 -cN -d20s`: 99.8% `GET /v1/jobs/{id}` and 0.2% `POST /v1/jobs`, while all 4 workers are busy decoding a 144-video backlog.
 
 | | Result |
 |---|---|
-| Throughput | 89.6k req/s, 0 errors |
-| Latency | p50 0.34 ms · p90 0.83 ms · p99 4.6 ms · p99.9 923 ms |
-| End to end (596 image jobs at 20/s, submit → result) | p50 59 ms · p99 98 ms, 0 failures |
+| Clients | Before: p99 · p99.9 · max · errors | After: p99 · p99.9 · max · errors | req/s before → after |
+|---|---|---|---|
+| 64 | 2.6 ms · 5.1 ms · 13 ms · 0 | 5.1 ms · 8.5 ms · 20 ms · 0 | 93.9k → 83.5k |
+| 72 | **554 ms · 1.45 s · 1.67 s · 24** | 3.9 ms · 7.7 ms · 20 ms · 0 | 93.6k → 86.1k |
+| 256 | 1.4 ms · 4.3 ms · 15 ms · **156** | 6.2 ms · 19 ms · 59 ms · 0 | 91.0k → 84.3k |
 
-The p99.9 tail is real and not yet explained. My guess is CPU starvation of individual httplib threads on a 4-core box running 4 decoders plus wrk. That guess is untested.
+End to end (596 image jobs at 20/s, submit → result): p50 59 ms · p99 98 ms, 0 failures.
+
+The tail used to be large and erratic: the first published p99.9 was 923 ms, and runs ranged from 5 ms to 1.4 s. It had two causes, and both are now fixed (`results/http_tail.json`):
+
+- **Connections waited for threads.** cpp-httplib serves a keep-alive connection on one pool thread until the client disconnects. With a fixed pool of 64, the 65th client waits for someone else to leave. At 72 clients that gave a p99 of 0.55 s and timeouts; at 256 clients, 156 requests timed out and the latency numbers only covered the clients that got a thread. The pool is now elastic (`ElasticPool` in `server.cpp`). When no thread is idle it starts one, up to 4096, and threads above a floor of 16 exit after 30 s idle.
+- **SYNs were dropped.** Packaged httplib listens with a backlog of 5, so a burst of connects overflowed the accept queue: 83 drops in one 20 s run, per `TcpExt:ListenOverflows`. Each dropped client waited out the 1 s SYN retransmit. httplib neither exposes the option nor the socket, so after binding, the server finds its listening socket in `/proc/self/fd` and calls `listen()` again with a backlog of 4096. On Linux that updates a socket that is already listening. Overflows are now 0 in every run.
+
+`tests/test_server.cpp` holds 200 keep-alive clients open at once and requires every one to get an answer within 2 s. The old pool fails it after 15 s; the new one passes in 54 ms.
+
+The new server does about 10% fewer requests per second at 64 clients, and that is not a like-for-like loss. The old server's higher number came partly from clients it wasn't serving. With reconnects ruled out (unlimited keep-alive), the old server still had a p99 of 0.71 s and timeouts at 64 clients, while the new one stays at 2.8 ms. Serving every connection at once costs more CPU per request on this oversubscribed 4-core box: 29 µs vs 25 µs of server CPU per request. That trade is the right one for an API where a stalled client is a failed upload.
 
 The first version managed 580 req/s, with p90 latency at 135 ms. cpp-httplib pins a keep-alive connection to one pool thread, and it closed connections every 5 requests, so 32 clients were queuing behind 16 threads. The fix was to size the pool for connections rather than cores and to raise the keep-alive limits. Workers also run at `SCHED_BATCH` with nice 10, so a saturated decoder pool can't starve the control plane.
 
@@ -112,9 +123,9 @@ On the main C++ run, 326 MB of video became 72 MB of JPEG keyframes and face cro
 
 ## Resume bullet
 
-> Built a C++20 media preprocessing service (OpenCV, FFmpeg libavcodec, Linux epoll/signalfd/timerfd, multi-process worker pool) that splits uploads into scenes, extracts keyframes and face crops, and removes near-duplicates before they hit a generative-media API. It runs at 48× realtime on 4 cores, 1.6–1.9× a Python implementation of the same algorithm at identical accuracy (scene-cut F1 0.98 on 434 labelled cuts). It completed 100% of valid jobs under injected segfaults, hangs and stalled URLs vs 13% for a Python process pool, and serves 90k req/s at p99 4.6 ms with every worker saturated. Jobs are durable in Postgres and survive `kill -9`; group commit over a libpq pipeline sustains 5.3k durable submits/s, 13.8× committing each write on its own.
+> Built a C++20 media preprocessing service (OpenCV, FFmpeg libavcodec, Linux epoll/signalfd/timerfd, multi-process worker pool) that splits uploads into scenes, extracts keyframes and face crops, and removes near-duplicates before they hit a generative-media API. It runs at 48× realtime on 4 cores, 1.6–1.9× a Python implementation of the same algorithm at identical accuracy (scene-cut F1 0.98 on 434 labelled cuts). It completed 100% of valid jobs under injected segfaults, hangs and stalled URLs vs 13% for a Python process pool, and serves 84k req/s with p99.9 under 10 ms from 64 to 256 concurrent clients while every worker is saturated (fixing a 1.4 s tail from thread pinning and a backlog-5 accept queue). Jobs are durable in Postgres and survive `kill -9`; group commit over a libpq pipeline sustains 5.3k durable submits/s, 13.8× committing each write on its own.
 
-Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool): 48× realtime, 1.6–1.9× faster than Python at equal accuracy, 100% vs 13% job completion under injected crashes and hangs, 90k req/s at p99 4.6 ms."*
+Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool): 48× realtime, 1.6–1.9× faster than Python at equal accuracy, 100% vs 13% job completion under injected crashes and hangs, 84k req/s at p99.9 < 10 ms."*
 
 ## Architecture
 
@@ -151,7 +162,7 @@ Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool):
 ```bash
 scripts/fetch_models.sh                    # ResNet-10 SSD face model (5 MB)
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
-(cd build && ctest)                        # 42 GoogleTest tests
+(cd build && ctest)                        # 43 GoogleTest tests
 # The 12 job-store tests need Postgres; without it they're skipped:
 MHPREP_TEST_PG="host=localhost user=postgres dbname=mhprep_test" ctest --test-dir build
 
@@ -174,7 +185,7 @@ build/mhprep process clip.mp4 --options '{"backend":"opencv","faces":false}'
 
 Per-job options: `backend` (`ffmpeg`|`opencv`), `skip_nonref`, `stride`, `faces`, `face_size`, `dup_radius`, `color_tolerance`, `scene_min_score`, `scene_ratio`, `scene_gradual`, `gradual_min_delta`, `gradual_max_residual`, `gradual_window_sec`, `io_timeout_ms`, `timeout_ms`, `write_assets`.
 
-The Docker image builds and runs the tests in the build stage, and the runtime image uses `tini` so `docker stop` triggers a graceful drain. I couldn't build it in the dev environment I used, because it had no Docker daemon.
+The Docker image builds and runs the tests in the build stage, and the runtime image uses `tini` so `docker stop` triggers a graceful drain. CI builds the image and runs `scripts/docker_smoke.sh` against it on every push.
 
 ## Reproducing
 

@@ -4,7 +4,22 @@
 
 #include <httplib.h>
 
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace mhprep {
 
@@ -33,6 +48,119 @@ std::optional<JobSpec> parse_spec(const json& j, std::string& err) {
   return s;
 }
 
+// cpp-httplib serves a keep-alive connection on one pool thread until the connection
+// closes, so a fixed pool of N threads serves at most N connections; connection N+1 sits
+// in the queue until some other client disconnects (or hits keep_alive_max_count). That
+// was the old p99.9 tail: with 72 clients on 64 threads, p99.9 was 0.6 s and some requests
+// timed out. This pool never makes a connection wait for a thread: when none is idle it
+// starts one (up to a hard cap), and threads above the floor exit after idling.
+class ElasticPool : public httplib::TaskQueue {
+ public:
+  ElasticPool(size_t min_threads, size_t max_threads, std::chrono::seconds idle_exit)
+      : min_(min_threads), max_(max_threads), idle_exit_(idle_exit) {
+    std::lock_guard lk(mu_);
+    for (size_t i = 0; i < min_; ++i) spawn_locked();
+  }
+  ~ElasticPool() override { shutdown(); }
+
+  void enqueue(std::function<void()> fn) override {
+    std::lock_guard lk(mu_);
+    jobs_.push_back(std::move(fn));
+    // Spawn when queued work outnumbers idle threads, so nothing waits behind a
+    // long-lived connection. Beyond max_, work queues (bounded memory under a flood).
+    if (jobs_.size() > idle_ && threads_ < max_) spawn_locked();
+    cv_.notify_one();
+  }
+
+  void shutdown() override {
+    std::vector<std::thread> joinable;
+    {
+      std::lock_guard lk(mu_);
+      if (stop_) return;
+      stop_ = true;
+      joinable.swap(all_);
+    }
+    cv_.notify_all();
+    for (auto& t : joinable) t.join();
+  }
+
+ private:
+  void spawn_locked() {
+    // Join threads that retired since the last spawn. Holding mu_ here means each has
+    // already released it for the last time and is just returning.
+    for (auto it = all_.begin(); it != all_.end();) {
+      if (std::find(retired_.begin(), retired_.end(), it->get_id()) != retired_.end()) {
+        it->join();
+        it = all_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    retired_.clear();
+    ++threads_;
+    all_.emplace_back([this] { run(); });
+  }
+
+  void run() {
+    std::unique_lock lk(mu_);
+    for (;;) {
+      ++idle_;
+      const bool woke = cv_.wait_for(lk, idle_exit_, [&] { return stop_ || !jobs_.empty(); });
+      --idle_;
+      if (stop_ && jobs_.empty()) break;
+      if (!woke) {
+        if (threads_ > min_) break;  // idle too long and above the floor: retire
+        continue;
+      }
+      auto fn = std::move(jobs_.front());
+      jobs_.pop_front();
+      lk.unlock();
+      fn();
+      lk.lock();
+    }
+    --threads_;
+    retired_.push_back(std::this_thread::get_id());  // joined by the next spawn or shutdown
+  }
+
+  const size_t min_, max_;
+  const std::chrono::seconds idle_exit_;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<std::function<void()>> jobs_;
+  std::vector<std::thread> all_;
+  std::vector<std::thread::id> retired_;
+  size_t threads_ = 0, idle_ = 0;
+  bool stop_ = false;
+};
+
+// cpp-httplib (as packaged, a compiled library) listens with a backlog of 5. When many
+// clients connect at once, the accept queue overflows, the kernel drops SYNs, and each
+// dropped client waits out the 1 s SYN retransmit timeout. httplib has no option for it
+// and doesn't expose the socket, so find our listening socket and call listen() again,
+// which on Linux updates the backlog of a socket that is already listening.
+bool raise_listen_backlog(int port, int backlog) {
+  DIR* d = ::opendir("/proc/self/fd");
+  if (!d) return false;
+  bool done = false;
+  while (dirent* e = ::readdir(d)) {
+    const int fd = std::atoi(e->d_name);
+    struct stat st{};
+    if (fd <= 2 || ::fstat(fd, &st) != 0 || !S_ISSOCK(st.st_mode)) continue;
+    int listening = 0;
+    socklen_t len = sizeof listening;
+    if (::getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &len) != 0 || !listening) continue;
+    sockaddr_storage addr{};
+    socklen_t alen = sizeof addr;
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &alen) != 0) continue;
+    int p = -1;
+    if (addr.ss_family == AF_INET) p = ntohs(reinterpret_cast<sockaddr_in*>(&addr)->sin_port);
+    if (addr.ss_family == AF_INET6) p = ntohs(reinterpret_cast<sockaddr_in6*>(&addr)->sin6_port);
+    if (p == port && ::listen(fd, backlog) == 0) done = true;
+  }
+  ::closedir(d);
+  return done;
+}
+
 }  // namespace
 
 struct HttpServer::Impl {
@@ -41,9 +169,10 @@ struct HttpServer::Impl {
 
 HttpServer::HttpServer(Supervisor& sup) : sup_(sup), impl_(std::make_unique<Impl>()) {
   auto& srv = impl_->srv;
-  // httplib binds a keep-alive connection to one pool thread, so size the pool for the
-  // expected number of concurrent client connections, not for CPU count.
-  srv.new_task_queue = [] { return new httplib::ThreadPool(64); };
+  // One thread per open connection (httplib's model), grown on demand; see ElasticPool.
+  srv.new_task_queue = [] {
+    return new ElasticPool(kMinHttpThreads, kMaxHttpThreads, std::chrono::seconds(30));
+  };
   srv.set_keep_alive_max_count(10000);
   srv.set_keep_alive_timeout(5);  // bounds how long a graceful stop waits on idle clients
   srv.set_tcp_nodelay(true);
@@ -151,6 +280,8 @@ HttpServer::~HttpServer() { stop(); }
 
 bool HttpServer::start(const std::string& host, int port) {
   if (!impl_->srv.bind_to_port(host, port)) return false;
+  if (!raise_listen_backlog(port, kListenBacklog))
+    std::fprintf(stderr, "mhprep: could not raise the listen backlog; expect SYN drops under load\n");
   thread_ = std::thread([this] { impl_->srv.listen_after_bind(); });
   return true;
 }
