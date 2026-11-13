@@ -1,0 +1,45 @@
+{
+  "control_plane_under_saturation": {
+    "tool": "wrk -t2 -c64 -d20s, 99.8% GET status / 0.2% POST job",
+    "pool_state": "4 workers busy decoding 144 queued video jobs",
+    "requests": 1794114,
+    "rps": 89605,
+    "errors": 0,
+    "p50_ms": 0.343,
+    "p90_ms": 0.825,
+    "p99_ms": 4.609,
+    "p999_ms": 923.451,
+    "max_ms": 2122.582,
+    "workers_busy_after": 4
+  },
+  "end_to_end_images_20_per_sec": {
+    "rate_per_sec": 20,
+    "jobs": 596,
+    "succeeded": 596,
+    "failed": 0,
+    "p50_ms": 59.3,
+    "p99_ms": 98.1
+  },
+  "metrics_sample": [
+    "mhprep_jobs_submitted_total 4327",
+    "mhprep_jobs_succeeded_total 4327",
+    "mhprep_jobs_failed_total 0",
+    "mhprep_job_retries_total 0",
+    "mhprep_job_timeouts_total 0",
+    "mhprep_worker_crashes_total 0",
+    "mhprep_worker_oom_total 0",
+    "mhprep_input_errors_total 0",
+    "mhprep_worker_spawns_total 4",
+    "mhprep_cross_job_duplicates_total 5038",
+    "mhprep_queue_depth 0",
+    "mhprep_jobs_running 0",
+    "mhprep_workers_alive 4",
+    "mhprep_job_latency_seconds_sum 369465",
+    "mhprep_job_latency_seconds_count 4327"
+  ],
+  "machine": {
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "cores": 4,
+    "date": "2026-11-13"
+  }
+}

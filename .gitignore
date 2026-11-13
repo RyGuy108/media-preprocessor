@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+bench/.work/
+bench/sources/
+build/
+corpus/
+models/*.caffemodel
+out/

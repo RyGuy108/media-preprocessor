@@ -1,0 +1,269 @@
+{
+  "corpus": {
+    "videos": 48,
+    "video_frames": 30521,
+    "video_minutes": 16.96,
+    "true_cuts": 434,
+    "images": 171,
+    "image_groups": 113,
+    "bytes": 362995183
+  },
+  "workers": 4,
+  "repeats": 3,
+  "configs": {
+    "cpp": {
+      "label": "C++ (FFmpeg decoder, skip non-ref frames)",
+      "wall_sec": 21.22,
+      "walls": [
+        21.22,
+        21.18,
+        21.3
+      ],
+      "source_frames_per_sec": 1438.1,
+      "realtime_factor": 47.9,
+      "frames_decoded": 16060,
+      "failed": 0,
+      "accuracy": {
+        "videos_missing": 0,
+        "scene_cuts": {
+          "precision": 0.9727,
+          "recall": 0.9862,
+          "f1": 0.9794,
+          "tp": 428,
+          "fp": 12,
+          "fn": 6
+        },
+        "keyframe_dedup": {
+          "precision": 0.9271,
+          "recall": 0.8558,
+          "f1": 0.89,
+          "tp": 89,
+          "fp": 7,
+          "fn": 15
+        },
+        "image_dedup": {
+          "precision": 0.9444,
+          "recall": 0.8793,
+          "f1": 0.9107,
+          "tp": 51,
+          "fp": 3,
+          "fn": 7,
+          "images": 171,
+          "images_processed": 171,
+          "flagged": 60,
+          "flagged_same_generation": 6,
+          "api_calls_avoided_pct": 35.09
+        }
+      },
+      "speedup_vs_py_tuned": 1.62,
+      "speedup_vs_py_naive": 1.93
+    },
+    "cpp_dense": {
+      "label": "C++ (FFmpeg decoder, every frame)",
+      "wall_sec": 27.24,
+      "walls": [
+        27.4,
+        27.24,
+        26.52
+      ],
+      "source_frames_per_sec": 1120.5,
+      "realtime_factor": 37.4,
+      "frames_decoded": 30521,
+      "failed": 0,
+      "accuracy": {
+        "videos_missing": 0,
+        "scene_cuts": {
+          "precision": 0.966,
+          "recall": 0.9816,
+          "f1": 0.9737,
+          "tp": 426,
+          "fp": 15,
+          "fn": 8
+        },
+        "keyframe_dedup": {
+          "precision": 0.9213,
+          "recall": 0.7664,
+          "f1": 0.8367,
+          "tp": 82,
+          "fp": 7,
+          "fn": 25
+        },
+        "image_dedup": {
+          "precision": 0.9444,
+          "recall": 0.8793,
+          "f1": 0.9107,
+          "tp": 51,
+          "fp": 3,
+          "fn": 7,
+          "images": 171,
+          "images_processed": 171,
+          "flagged": 60,
+          "flagged_same_generation": 6,
+          "api_calls_avoided_pct": 35.09
+        }
+      },
+      "speedup_vs_py_tuned": 1.26,
+      "speedup_vs_py_naive": 1.5
+    },
+    "cpp_opencv": {
+      "label": "C++ (cv::VideoCapture)",
+      "wall_sec": 37.37,
+      "walls": [
+        37.38,
+        37.37,
+        36.64
+      ],
+      "source_frames_per_sec": 816.6,
+      "realtime_factor": 27.2,
+      "frames_decoded": 30521,
+      "failed": 0,
+      "accuracy": {
+        "videos_missing": 0,
+        "scene_cuts": {
+          "precision": 0.966,
+          "recall": 0.9816,
+          "f1": 0.9737,
+          "tp": 426,
+          "fp": 15,
+          "fn": 8
+        },
+        "keyframe_dedup": {
+          "precision": 0.9326,
+          "recall": 0.7757,
+          "f1": 0.8469,
+          "tp": 83,
+          "fp": 6,
+          "fn": 24
+        },
+        "image_dedup": {
+          "precision": 0.9444,
+          "recall": 0.8793,
+          "f1": 0.9107,
+          "tp": 51,
+          "fp": 3,
+          "fn": 7,
+          "images": 171,
+          "images_processed": 171,
+          "flagged": 60,
+          "flagged_same_generation": 6,
+          "api_calls_avoided_pct": 35.09
+        }
+      },
+      "speedup_vs_py_tuned": 0.92,
+      "speedup_vs_py_naive": 1.09
+    },
+    "py_tuned": {
+      "label": "Python (tuned: grab/retrieve, 1 thread per process)",
+      "wall_sec": 34.34,
+      "walls": [
+        34.34,
+        34.4,
+        34.22
+      ],
+      "source_frames_per_sec": 888.7,
+      "realtime_factor": 29.6,
+      "frames_decoded": 30521,
+      "failed": 0,
+      "accuracy": {
+        "videos_missing": 0,
+        "scene_cuts": {
+          "precision": 0.966,
+          "recall": 0.9816,
+          "f1": 0.9737,
+          "tp": 426,
+          "fp": 15,
+          "fn": 8
+        },
+        "keyframe_dedup": {
+          "precision": 0.9326,
+          "recall": 0.7757,
+          "f1": 0.8469,
+          "tp": 83,
+          "fp": 6,
+          "fn": 24
+        },
+        "image_dedup": {
+          "precision": 0.9444,
+          "recall": 0.8793,
+          "f1": 0.9107,
+          "tp": 51,
+          "fp": 3,
+          "fn": 7,
+          "images": 171,
+          "images_processed": 171,
+          "flagged": 60,
+          "flagged_same_generation": 6,
+          "api_calls_avoided_pct": 35.09
+        }
+      },
+      "speedup_vs_py_tuned": 1.0,
+      "speedup_vs_py_naive": 1.19
+    },
+    "py_naive": {
+      "label": "Python (cap.read(), default threads)",
+      "wall_sec": 40.92,
+      "walls": [
+        40.92,
+        40.92,
+        40.68
+      ],
+      "source_frames_per_sec": 745.9,
+      "realtime_factor": 24.9,
+      "frames_decoded": 30521,
+      "failed": 0,
+      "accuracy": {
+        "videos_missing": 0,
+        "scene_cuts": {
+          "precision": 0.966,
+          "recall": 0.9816,
+          "f1": 0.9737,
+          "tp": 426,
+          "fp": 15,
+          "fn": 8
+        },
+        "keyframe_dedup": {
+          "precision": 0.9326,
+          "recall": 0.7757,
+          "f1": 0.8469,
+          "tp": 83,
+          "fp": 6,
+          "fn": 24
+        },
+        "image_dedup": {
+          "precision": 0.9444,
+          "recall": 0.8793,
+          "f1": 0.9107,
+          "tp": 51,
+          "fp": 3,
+          "fn": 7,
+          "images": 171,
+          "images_processed": 171,
+          "flagged": 60,
+          "flagged_same_generation": 6,
+          "api_calls_avoided_pct": 35.09
+        }
+      },
+      "speedup_vs_py_tuned": 0.84,
+      "speedup_vs_py_naive": 1.0
+    }
+  },
+  "api_payload": {
+    "video_bytes_in": 325959392,
+    "asset_bytes_out": 71764012,
+    "bytes_reduction_x": 4.5,
+    "scenes": 488,
+    "duplicate_shot_keyframes_dropped": 391,
+    "face_crops": 333,
+    "duplicate_face_crops_dropped": 0,
+    "images": 171,
+    "duplicate_images_flagged": 60,
+    "api_calls_before": 659,
+    "api_calls_after": 208,
+    "api_calls_avoided_pct": 68.4
+  },
+  "machine": {
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.30GHz",
+    "cores": 4,
+    "date": "2026-11-12"
+  }
+}
