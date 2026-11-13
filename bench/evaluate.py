@@ -22,18 +22,27 @@ def load_report(path: str) -> dict[str, dict]:
     return out
 
 
-def match_cuts(truth: list[int], pred: list[int], tol: int = TOLERANCE) -> int:
-    """Greedy one-to-one matching within tolerance; returns true positives."""
-    used, tp = set(), 0
-    for t in truth:
+def match_cuts(truth: list, pred: list[int], tol: int = TOLERANCE) -> int:
+    """Greedy one-to-one matching within tolerance; returns true positives.
+
+    A truth entry is a frame (hard cut) or a [first, last] frame interval (a dissolve or
+    fade): a prediction anywhere in the interval, give or take `tol`, matches it."""
+    return len(match_cut_pairs(truth, pred, tol))
+
+
+def match_cut_pairs(truth: list, pred: list[int], tol: int = TOLERANCE) -> list[tuple[int, int]]:
+    used, pairs = set(), []
+    for ti, t in enumerate(truth):
+        lo, hi = (t, t) if isinstance(t, int) else t
+        dist = lambda p: max(lo - p, p - hi, 0)  # noqa: E731
         best = None
         for i, p in enumerate(pred):
-            if i not in used and abs(p - t) <= tol and (best is None or abs(p - t) < abs(pred[best] - t)):
+            if i not in used and dist(p) <= tol and (best is None or dist(p) < dist(pred[best])):
                 best = i
         if best is not None:
             used.add(best)
-            tp += 1
-    return tp
+            pairs.append((ti, best))
+    return pairs
 
 
 def lineage(src: str) -> str | None:
@@ -63,6 +72,7 @@ def segment_of(frame: int, video: dict) -> dict:
 def score(truth: dict, report: dict[str, dict]) -> dict:
     # --- scene cuts ---
     tp = fp = fn = 0
+    by_kind = defaultdict(lambda: [0, 0])  # truth kind -> [found, total]
     kf_dup_tp = kf_dup_fp = kf_dup_fn = 0
     missing = 0
     for v in truth["videos"]:
@@ -73,10 +83,18 @@ def score(truth: dict, report: dict[str, dict]) -> dict:
             continue
         m = r["manifest"]
         pred = [s["start_frame"] for s in m["scenes"][1:]]
-        t = match_cuts(v["cuts"], pred)
+        truth_cuts = v.get("cut_intervals", v["cuts"])
+        pairs = match_cut_pairs(truth_cuts, pred)
+        t = len(pairs)
         tp += t
         fp += len(pred) - t
-        fn += len(v["cuts"]) - t
+        fn += len(truth_cuts) - t
+        kinds = {tr["start"]: tr["kind"] for tr in v.get("transitions", [])}
+        found = {ti for ti, _ in pairs}
+        for ti, c in enumerate(truth_cuts):
+            k = "cut" if isinstance(c, int) or c[0] == c[1] else kinds.get(c[0], "gradual")
+            by_kind[k][1] += 1
+            by_kind[k][0] += ti in found
         # --- keyframe dedup within a video ---
         assets = m["assets"]
         seen_groups = set()
@@ -132,6 +150,8 @@ def score(truth: dict, report: dict[str, dict]) -> dict:
     return {
         "videos_missing": missing,
         "scene_cuts": prf(tp, fp, fn),
+        "scene_cut_recall_by_kind": {k: {"found": f, "total": n, "recall": round(f / n, 4)}
+                                     for k, (f, n) in sorted(by_kind.items())},
         "keyframe_dedup": prf(kf_dup_tp, kf_dup_fp, kf_dup_fn),
         "image_dedup": {**prf(d_tp, d_fp, expected_dups - d_tp),
                         "images": n_images, "images_processed": images_ok,

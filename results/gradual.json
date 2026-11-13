@@ -1,0 +1,88 @@
+{
+  "corpus": "corpus/gradual-test: 48 videos, 15.3 min, 426 cuts (363 hard, 40 dissolves, 23 fades of 15-45 frames), seed 1; tuned on corpus/gradual-dev (seed 7)",
+  "gradual_test": {
+    "off": {
+      "scene_cuts": {
+        "precision": 0.9805,
+        "recall": 0.946,
+        "f1": 0.963,
+        "tp": 403,
+        "fp": 8,
+        "fn": 23
+      },
+      "scene_cut_recall_by_kind": {
+        "cut": {
+          "found": 355,
+          "total": 363,
+          "recall": 0.978
+        },
+        "dissolve": {
+          "found": 25,
+          "total": 40,
+          "recall": 0.625
+        },
+        "fade": {
+          "found": 23,
+          "total": 23,
+          "recall": 1.0
+        }
+      }
+    },
+    "on": {
+      "scene_cuts": {
+        "precision": 0.9761,
+        "recall": 0.9601,
+        "f1": 0.968,
+        "tp": 409,
+        "fp": 10,
+        "fn": 17
+      },
+      "scene_cut_recall_by_kind": {
+        "cut": {
+          "found": 354,
+          "total": 363,
+          "recall": 0.9752
+        },
+        "dissolve": {
+          "found": 33,
+          "total": 40,
+          "recall": 0.825
+        },
+        "fade": {
+          "found": 22,
+          "total": 23,
+          "recall": 0.9565
+        }
+      }
+    }
+  },
+  "hard_cut_test": {
+    "corpus": "corpus/test (434 hard cuts)",
+    "off": {
+      "precision": 0.9727,
+      "recall": 0.9862,
+      "f1": 0.9794,
+      "fp": 12,
+      "fn": 6
+    },
+    "on": {
+      "precision": 0.9621,
+      "recall": 0.9816,
+      "f1": 0.9718,
+      "fp": 17,
+      "fn": 8
+    }
+  },
+  "throughput_cost": {
+    "corpus/test inputs, 4 workers, 2 runs each": {
+      "off_wall_sec": [
+        29.22,
+        29.56
+      ],
+      "on_wall_sec": [
+        29.29,
+        29.37
+      ]
+    }
+  }
+}
