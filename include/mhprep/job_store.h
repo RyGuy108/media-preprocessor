@@ -80,8 +80,21 @@ class JobStore {
   // Blocks until every write queued so far is committed (tests, graceful shutdown).
   void flush();
 
+  // Retention: finished jobs (and their dedup hashes) older than `keep` are deleted in
+  // batches, on a maintenance thread with its own connection so it never delays the
+  // writer. Unfinished jobs are never touched. First pass runs immediately.
+  struct Retention {
+    std::chrono::seconds keep{0};
+    std::chrono::seconds every{600};
+    size_t batch = 5000;  // rows per DELETE: short transactions, short row locks
+  };
+  void start_retention(Retention r);
+  // One synchronous pass; returns the number of jobs deleted.
+  uint64_t prune(std::chrono::seconds older_than, size_t batch = 5000);
+
   struct Stats {
     uint64_t transactions = 0, writes = 0, failed_transactions = 0;
+    uint64_t pruned = 0, prune_passes = 0;
   };
   Stats stats() const;
 
@@ -89,6 +102,7 @@ class JobStore {
   struct Op;
   struct Conn;
   void writer_loop();
+  uint64_t prune_with(Conn& c, std::chrono::seconds older_than, size_t batch);
   bool apply_batch(Conn& c, std::vector<Op>& batch, bool include_inserts);
 
   std::string conninfo_;
@@ -105,6 +119,9 @@ class JobStore {
   bool stop_ = false;
   Stats stats_;
   std::thread writer_;
+
+  std::condition_variable maint_cv_;
+  std::thread maint_;
 };
 
 }  // namespace mhprep

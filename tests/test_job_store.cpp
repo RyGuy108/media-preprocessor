@@ -248,3 +248,63 @@ TEST_F(JobStoreTest, ConcurrentSubmitsShareTransactions) {
   EXPECT_LT(st.transactions, static_cast<uint64_t>(kThreads * kPerThread))
       << "group commit should batch concurrent inserts";
 }
+
+TEST_F(JobStoreTest, RetentionPrunesOldFinishedJobsAtStartup) {
+  uint64_t old_ok, old_bad, recent, newest;
+  {
+    Supervisor a(config());
+    old_ok = *a.submit({image("a.png", 1), "acme"});
+    old_bad = *a.submit({"chaos://bad"});
+    recent = *a.submit({"chaos://ok"});
+    newest = *a.submit({"chaos://ok"});
+    a.run(true);
+  }
+  const std::string old_ids = std::to_string(old_ok) + ", " + std::to_string(old_bad);
+  ASSERT_NE(sql("SELECT count(*) FROM mhprep_asset_hashes WHERE job_id = " +
+                std::to_string(old_ok)),
+            "0");
+  // Age everything but `recent` past the cutoff, including the highest id.
+  sql("UPDATE mhprep_jobs SET finished_at = now() - interval '40 days' WHERE id IN (" +
+      old_ids + ", " + std::to_string(newest) + ")");
+  // An old job that never finished: retention must leave it alone.
+  sql("UPDATE mhprep_jobs SET state = 'queued', finished_at = NULL, "
+      "submitted_at = now() - interval '40 days' WHERE id = " + std::to_string(recent));
+
+  PoolConfig c = config();
+  c.db_retain = std::chrono::hours(24 * 30);
+  Supervisor b(c);
+  // The first pass runs right away, on its own thread.
+  for (int i = 0; i < 500 && b.store_stats()->prune_passes == 0; ++i)
+    std::this_thread::sleep_for(10ms);
+  const auto st = *b.store_stats();
+  ASSERT_GE(st.prune_passes, 1u);
+  EXPECT_EQ(st.pruned, 2u);
+  EXPECT_EQ(sql("SELECT count(*) FROM mhprep_jobs WHERE id IN (" + old_ids + ")"), "0");
+  EXPECT_EQ(sql("SELECT count(*) FROM mhprep_asset_hashes"), "0") << "hashes cascade";
+  EXPECT_EQ(sql("SELECT state FROM mhprep_jobs WHERE id = " + std::to_string(recent)), "queued");
+  EXPECT_EQ(sql("SELECT count(*) FROM mhprep_jobs WHERE id = " + std::to_string(newest)), "1")
+      << "the highest id is kept so ids are never reused";
+  EXPECT_EQ(*b.submit({"chaos://ok"}), newest + 1);
+  EXPECT_FALSE(b.describe(old_ok, false));
+}
+
+TEST_F(JobStoreTest, RetentionIsOffByDefaultAndBatched) {
+  {
+    Supervisor a(config(4));
+    for (int i = 0; i < 25; ++i) a.submit({"chaos://ok"});
+    a.run(true);
+  }
+  sql("UPDATE mhprep_jobs SET finished_at = now() - interval '2 days'");
+  {
+    Supervisor b(config());
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(b.store_stats()->prune_passes, 0u);
+  }
+  EXPECT_EQ(sql("SELECT count(*) FROM mhprep_jobs"), "25");
+
+  JobStore store(conninfo_);
+  EXPECT_EQ(store.prune(std::chrono::hours(72)), 0u) << "nothing is old enough";
+  EXPECT_EQ(store.prune(std::chrono::hours(24), /*batch=*/4), 24u) << "all but the highest id";
+  EXPECT_EQ(store.stats().pruned, 24u);
+  EXPECT_EQ(sql("SELECT count(*) FROM mhprep_jobs"), "1");
+}

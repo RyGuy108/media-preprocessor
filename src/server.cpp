@@ -135,6 +135,8 @@ HttpServer::HttpServer(Supervisor& sup) : sup_(sup), impl_(std::make_unique<Impl
       counter("mhprep_store_writes_total", st->writes, "Job store writes");
       counter("mhprep_store_failed_transactions_total", st->failed_transactions,
               "Job store transactions that failed and were retried");
+      counter("mhprep_store_pruned_total", st->pruned,
+              "Finished jobs deleted by retention");
     }
     gauge("mhprep_queue_depth", s.queued);
     gauge("mhprep_jobs_running", s.running);

@@ -92,6 +92,8 @@ PoolConfig pool_config(const Args& a) {
   c.db = a.get("db");
   if (c.db.empty())
     if (const char* env = std::getenv("MHPREP_DB")) c.db = env;
+  c.db_retain = std::chrono::seconds(
+      static_cast<long>(std::stod(a.get("retain-days", "0")) * 86400));
   if (auto o = a.get("options"); !o.empty()) c.default_options = json::parse(o);
   return c;
 }
@@ -234,6 +236,7 @@ int main(int argc, char** argv) {
   std::cerr << "usage: mhprep run|serve|process [flags] ...\n"
                "  pool flags: --workers N --timeout-ms MS --max-attempts N --mem-mb MB\n"
                "              --out DIR --options JSON --dup-radius N --no-cross-dedup\n"
-               "              --db CONNINFO (or MHPREP_DB): keep job state in Postgres\n";
+               "              --db CONNINFO (or MHPREP_DB): keep job state in Postgres\n"
+               "              --retain-days D: delete finished jobs older than D days\n";
   return 2;
 }

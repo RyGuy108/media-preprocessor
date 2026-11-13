@@ -70,6 +70,9 @@ struct PoolConfig {
   // a restart (see job_store.h).
   std::string db;
   std::chrono::milliseconds db_submit_timeout{5'000};
+  // Delete finished jobs older than this from the store (0 = keep forever). Their
+  // cross-upload dedup hashes go with them, so this is also the dedup window.
+  std::chrono::seconds db_retain{0};
 };
 
 enum class JobState { kQueued, kRunning, kSucceeded, kFailed };

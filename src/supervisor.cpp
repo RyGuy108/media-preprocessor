@@ -144,6 +144,7 @@ Supervisor::Supervisor(PoolConfig cfg)
   if (!cfg_.db.empty()) {
     store_ = std::make_unique<JobStore>(cfg_.db);
     recover();
+    store_->start_retention({cfg_.db_retain});
   }
 }
 

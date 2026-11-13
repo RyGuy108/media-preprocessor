@@ -89,6 +89,7 @@ The semantics are deliberate:
 - **Cross-upload dedup survives restarts.** Each new unique keyframe or image hash is stored with its job, and the per-tenant BK-trees are rebuilt at startup.
 - **One supervisor per database.** A session-level advisory lock is held on its own connection, so a second supervisor fails at startup instead of double-running recovered jobs. Postgres releases the lock automatically if the holder dies.
 - **Evicted records are still served.** `GET /v1/jobs/{id}` falls back to Postgres for jobs no longer held in memory.
+- **Retention (`--retain-days D`).** Off by default. When set, a maintenance thread on its own connection deletes finished jobs older than D days, oldest first, 5,000 rows per statement, at startup and then every 10 minutes. Their dedup hashes go with them (`ON DELETE CASCADE`). Queued and running jobs are never touched, and the highest id is always kept, because the next id after a restart is seeded from it. On a 1M-job store (509 MB), pruning 500k jobs takes 3.6 s and moves concurrent commit p99 from 1.4 ms to 1.8 ms (`results/retention.json`). Batch size made no latency difference in that test, since nothing else touches old finished rows. Batches are there to keep transactions short, so a failure or shutdown loses at most one batch of work.
 
 ### Dissolves and fades (`"scene_gradual": true`, `results/gradual.json`)
 
@@ -150,8 +151,8 @@ Shorter: *"C++20 video preprocessing service (OpenCV/FFmpeg, epoll worker pool):
 ```bash
 scripts/fetch_models.sh                    # ResNet-10 SSD face model (5 MB)
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
-(cd build && ctest)                        # 40 GoogleTest tests
-# The 10 job-store tests need Postgres; without it they're skipped:
+(cd build && ctest)                        # 42 GoogleTest tests
+# The 12 job-store tests need Postgres; without it they're skipped:
 MHPREP_TEST_PG="host=localhost user=postgres dbname=mhprep_test" ctest --test-dir build
 
 # Batch
@@ -165,7 +166,7 @@ curl 'localhost:8080/v1/jobs/1?wait_ms=30000'      # long-poll until done; retur
 curl localhost:8080/metrics                         # Prometheus
 
 # Durable: jobs survive a restart (or MHPREP_DB=...)
-build/mhprep serve --port 8080 --db "host=localhost dbname=mhprep user=mhprep"
+build/mhprep serve --port 8080 --db "host=localhost dbname=mhprep user=mhprep" --retain-days 30
 
 # One file, in process (debugging)
 build/mhprep process clip.mp4 --options '{"backend":"opencv","faces":false}'
@@ -202,7 +203,7 @@ results/          benchmark output
 
 ## Limits and next steps
 
-- The durable store keeps every job row forever. A retention job (or partitioning by `submitted_at`) is needed before long-running production use.
+- Retention deletes rows, so a very busy store still leaves table bloat for autovacuum to reclaim. Past tens of millions of jobs a day, partitioning by `finished_at` and dropping whole partitions would be cheaper.
 - One supervisor per database. Scaling out means sharding tenants across supervisors, or moving to `SELECT ... FOR UPDATE SKIP LOCKED` dispatch so several supervisors can share a queue.
 - Gradual-transition detection (opt-in) misses dissolves between moving shots. A motion-compensated version of the linearity test, or a learned boundary model, would be the next step.
 - Face crops aren't deduplicated across uploads, because the same person in two photos is usually a different, wanted crop.
