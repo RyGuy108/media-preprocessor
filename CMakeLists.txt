@@ -16,6 +16,7 @@ find_package(nlohmann_json 3.10 REQUIRED)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
+pkg_check_modules(PQ REQUIRED IMPORTED_TARGET libpq)
 # cpp-httplib: Debian/Ubuntu ship it as a compiled library (cpp-httplib.pc); elsewhere
 # it is header-only.
 pkg_check_modules(HTTPLIB IMPORTED_TARGET cpp-httplib)
@@ -38,10 +39,11 @@ add_library(mhprep_core STATIC
   src/supervisor.cpp
   src/worker.cpp
   src/metrics.cpp
+  src/job_store.cpp
 )
 target_include_directories(mhprep_core PUBLIC include)
 target_link_libraries(mhprep_core PUBLIC
-  ${OpenCV_LIBS} nlohmann_json::nlohmann_json PkgConfig::LIBAV Threads::Threads)
+  ${OpenCV_LIBS} nlohmann_json::nlohmann_json PkgConfig::LIBAV PkgConfig::PQ Threads::Threads)
 
 add_executable(mhprep src/main.cpp src/server.cpp)
 target_include_directories(mhprep PRIVATE ${HTTPLIB_INCLUDE_DIR})
@@ -60,6 +62,7 @@ if(MHPREP_BUILD_TESTS)
     tests/test_ipc.cpp
     tests/test_pipeline.cpp
     tests/test_supervisor.cpp
+    tests/test_job_store.cpp
   )
   target_link_libraries(mhprep_tests PRIVATE mhprep_core GTest::gtest_main)
   target_compile_definitions(mhprep_tests PRIVATE

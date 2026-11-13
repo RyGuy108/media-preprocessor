@@ -141,6 +141,40 @@ Supervisor::Supervisor(PoolConfig cfg)
   epoll_mod(sigfd_, EPOLLIN, true);
   epoll_mod(timerfd_, EPOLLIN, true);
   epoll_mod(evfd_, EPOLLIN, true);
+  if (!cfg_.db.empty()) {
+    store_ = std::make_unique<JobStore>(cfg_.db);
+    recover();
+  }
+}
+
+// Rebuild in-memory state from the store: unfinished jobs go back on the queue in id
+// order, ids continue past the highest ever issued, and the cross-upload dedup index is
+// reloaded so a re-upload after a restart is still caught.
+void Supervisor::recover() {
+  std::lock_guard lk(mu_);
+  next_id_ = store_->max_id() + 1;
+  const auto sys_now = std::chrono::system_clock::now();
+  const auto steady_now = Clock::now();
+  for (RecoveredJob& rj : store_->load_unfinished()) {
+    JobRecord r;
+    r.id = rj.id;
+    r.spec = {std::move(rj.input), std::move(rj.tenant), std::move(rj.options)};
+    r.attempts = rj.attempts;
+    r.attempt_log = std::move(rj.attempt_log);
+    // Keep latency honest across the restart: it includes the downtime.
+    r.submitted = steady_now - std::chrono::duration_cast<Clock::duration>(sys_now - rj.submitted);
+    if (rj.was_running) store_->mark_queued(r.id, r.attempts, r.attempt_log);
+    queue_.push_back(r.id);
+    jobs_.emplace(r.id, std::move(r));
+    ++unfinished_;
+    ++stats_.recovered;
+  }
+  for (const StoredHash& h : store_->load_hashes()) {
+    auto [it, _] = tenant_hashes_.try_emplace(h.tenant, cfg_.dup_radius, cfg_.color_tolerance);
+    TenantIndex& t = it->second;
+    t.index.add(h.phash, h.sig, static_cast<int64_t>(t.owners.size()));
+    t.owners.emplace_back(h.job_id, h.asset);
+  }
 }
 
 Supervisor::~Supervisor() {
@@ -170,16 +204,30 @@ void Supervisor::epoll_mod(int fd, uint32_t events, bool add) {
 // ---------------------------------------------------------------------------------------
 // Public, thread-safe API
 // ---------------------------------------------------------------------------------------
-std::optional<uint64_t> Supervisor::submit(JobSpec spec) {
-  uint64_t id;
+std::optional<uint64_t> Supervisor::submit(JobSpec spec, std::string* why) {
+  auto refuse = [&](const char* reason) -> std::optional<uint64_t> {
+    if (why) *why = reason;
+    return std::nullopt;
+  };
+  JobRecord r;
   {
     std::lock_guard lk(mu_);
-    if (stop_requested_ || queue_.size() >= cfg_.max_queue) return std::nullopt;
-    id = next_id_++;
-    JobRecord r;
-    r.id = id;
-    r.spec = std::move(spec);
-    r.submitted = Clock::now();
+    if (stop_requested_) return refuse("stopping");
+    if (queue_.size() >= cfg_.max_queue) return refuse("queue_full");
+    r.id = next_id_++;
+  }
+  r.spec = std::move(spec);
+  r.submitted = Clock::now();
+  // Durable mode: the row is committed before the job exists in memory, so nothing can
+  // dispatch it (and write its state) ahead of the insert, and a refusal leaves no trace.
+  if (store_ && !store_->insert_durable(r, cfg_.db_submit_timeout)) {
+    std::lock_guard lk(mu_);
+    ++stats_.store_rejects;
+    return refuse("store");
+  }
+  const uint64_t id = r.id;
+  {
+    std::lock_guard lk(mu_);
     jobs_.emplace(id, std::move(r));
     queue_.push_back(id);
     ++unfinished_;
@@ -198,10 +246,24 @@ std::optional<JobRecord> Supervisor::get(uint64_t id) const {
 }
 
 std::optional<json> Supervisor::describe(uint64_t id, bool include_manifest) const {
-  std::lock_guard lk(mu_);
-  auto it = jobs_.find(id);
-  if (it == jobs_.end()) return std::nullopt;
-  return it->second.to_json(include_manifest);
+  {
+    std::lock_guard lk(mu_);
+    auto it = jobs_.find(id);
+    if (it != jobs_.end()) return it->second.to_json(include_manifest);
+  }
+  // Evicted from memory, or finished before a restart. Flush first so a job evicted a
+  // moment ago isn't read back in an older state (rare path; eviction lags by
+  // max_finished_jobs completions).
+  if (store_) {
+    store_->flush();
+    return store_->describe(id, include_manifest);
+  }
+  return std::nullopt;
+}
+
+std::optional<JobStore::Stats> Supervisor::store_stats() const {
+  if (!store_) return std::nullopt;
+  return store_->stats();
 }
 
 bool Supervisor::wait_done(uint64_t id, std::chrono::milliseconds timeout) const {
@@ -313,8 +375,9 @@ void Supervisor::dispatch() {
       JobRecord& job = jobs_.at(id);
       job.state = JobState::kRunning;
       ++job.attempts;
-      if (job.attempts == 1) job.started = Clock::now();
+      if (job.started == Clock::time_point{}) job.started = Clock::now();
       ++stats_.running;
+      if (store_) store_->mark_running(id, job.attempts);
       json opts = cfg_.default_options;
       opts.merge_patch(job.spec.options);
       if (opts.contains("timeout_ms"))
@@ -370,8 +433,9 @@ void Supervisor::handle_message(Worker& w, const json& msg) {
   JobRecord& job = jobs_.at(id);
   if (msg.value("ok", false)) {
     job.manifest = msg["manifest"];
-    if (cfg_.cross_job_dedup) apply_cross_dedup(job);
-    finish(job, JobState::kSucceeded);
+    std::vector<StoredHash> added;
+    if (cfg_.cross_job_dedup) apply_cross_dedup(job, added);
+    finish(job, JobState::kSucceeded, std::move(added));
     return;
   }
   const std::string kind = msg.value("error_kind", "internal");
@@ -400,6 +464,17 @@ void Supervisor::fail_or_retry(uint64_t job_id, const std::string& kind, const s
     job.state = JobState::kQueued;
     queue_.push_back(job_id);  // back of the line: a poison job can't monopolise workers
     ++stats_.retries;
+    if (store_) store_->mark_queued(job_id, job.attempts, job.attempt_log);
+    return;
+  }
+  if (stopping_ && store_) {
+    // Killed by the drain deadline. Durable mode doesn't give up on it: it goes back to
+    // queued in the store and runs after the restart, without counting this attempt.
+    job.attempt_log.back() = "attempt " + std::to_string(job.attempts) +
+                             ": interrupted: shutdown (" + kind + ")";
+    --job.attempts;
+    job.state = JobState::kQueued;
+    store_->mark_queued(job_id, job.attempts, job.attempt_log);
     return;
   }
   job.error_kind = stopping_ ? "cancelled" : kind;
@@ -410,10 +485,11 @@ void Supervisor::fail_or_retry(uint64_t job_id, const std::string& kind, const s
 }
 
 // Requires mu_ held.
-void Supervisor::finish(JobRecord& job, JobState st) {
+void Supervisor::finish(JobRecord& job, JobState st, std::vector<StoredHash> new_hashes) {
   job.state = st;
   job.finished = Clock::now();
   if (job.started == Clock::time_point{}) job.started = job.finished;
+  if (store_) store_->mark_finished(job, std::move(new_hashes));
   --unfinished_;
   if (st == JobState::kSucceeded) ++stats_.succeeded;
   else ++stats_.failed;
@@ -428,7 +504,7 @@ void Supervisor::finish(JobRecord& job, JobState st) {
 }
 
 // Requires mu_ held.
-void Supervisor::apply_cross_dedup(JobRecord& job) {
+void Supervisor::apply_cross_dedup(JobRecord& job, std::vector<StoredHash>& added) {
   auto& assets = job.manifest["assets"];
   auto [tit, _] = tenant_hashes_.try_emplace(job.spec.tenant, cfg_.dup_radius, cfg_.color_tolerance);
   TenantIndex& t = tit->second;
@@ -447,6 +523,7 @@ void Supervisor::apply_cross_dedup(JobRecord& job) {
     } else {
       t.index.add(h, sig, static_cast<int64_t>(t.owners.size()));
       t.owners.emplace_back(job.id, static_cast<int>(i));
+      added.push_back({job.spec.tenant, job.id, static_cast<int>(i), h, sig});
     }
   }
   job.cross_job_duplicates = dups;
@@ -542,6 +619,8 @@ void Supervisor::begin_stop() {
   {
     std::lock_guard lk(mu_);
     stop_requested_ = true;
+    // Durable mode: queued jobs stay queued in the store and run after the restart.
+    if (store_) queue_.clear();
     for (uint64_t id : queue_) {
       JobRecord& job = jobs_.at(id);
       job.error = "service shutting down before the job started";

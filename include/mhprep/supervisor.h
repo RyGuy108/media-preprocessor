@@ -13,6 +13,8 @@
 //    that worker instead of the kernel OOM killer picking a victim.
 //  * Cross-upload dedup: every unique keyframe/image is checked against a per-tenant
 //    BK-tree of perceptual hashes, so re-uploads aren't sent to the API twice.
+//  * With PoolConfig::db set, every job is written to Postgres before submit() returns,
+//    and a restarted supervisor resumes the jobs that were queued or running.
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -28,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include "mhprep/hash_index.h"
+#include "mhprep/job_store.h"
 #include "mhprep/metrics.h"
 #include "mhprep/phash.h"
 
@@ -63,6 +66,10 @@ struct PoolConfig {
   size_t max_finished_jobs = 200'000;  // older finished records are evicted
   std::chrono::milliseconds drain_timeout{30'000};
   bool handle_term_signals = true;  // SIGTERM/SIGINT start a graceful drain
+  // Postgres connection string. Empty keeps job state in memory only; set, jobs survive
+  // a restart (see job_store.h).
+  std::string db;
+  std::chrono::milliseconds db_submit_timeout{5'000};
 };
 
 enum class JobState { kQueued, kRunning, kSucceeded, kFailed };
@@ -94,6 +101,7 @@ struct PoolStats {
   uint64_t timeouts = 0, crashes = 0, oom = 0, input_errors = 0;
   uint64_t worker_spawns = 0, worker_deaths = 0;
   uint64_t cross_job_duplicates = 0;
+  uint64_t recovered = 0, store_rejects = 0;  // durable mode only
   size_t queued = 0, running = 0, workers_alive = 0;
 };
 
@@ -108,8 +116,8 @@ class Supervisor {
   // any thread so every thread inherits the mask.
   static void block_signals();
 
-  // Thread-safe.
-  std::optional<uint64_t> submit(JobSpec spec);
+  // Thread-safe. On refusal, `why` (if given) is "queue_full", "stopping" or "store".
+  std::optional<uint64_t> submit(JobSpec spec, std::string* why = nullptr);
   std::optional<JobRecord> get(uint64_t id) const;
   // Serialised record, built under the lock without copying the manifest when it is
   // not wanted (the hot path for status polling).
@@ -119,6 +127,8 @@ class Supervisor {
   // Same, without copying the record out. Returns true if the job is finished.
   bool wait_done(uint64_t id, std::chrono::milliseconds timeout) const;
   PoolStats stats() const;
+  bool durable() const { return store_ != nullptr; }
+  std::optional<JobStore::Stats> store_stats() const;
   const LatencyRecorder& latency() const { return latency_; }
   void request_stop();
 
@@ -141,8 +151,9 @@ class Supervisor {
   void reap_children();
   void on_worker_exit(Worker& w, int status);
   void fail_or_retry(uint64_t job_id, const std::string& kind, const std::string& why);
-  void finish(JobRecord& job, JobState st);
-  void apply_cross_dedup(JobRecord& job);
+  void finish(JobRecord& job, JobState st, std::vector<StoredHash> new_hashes = {});
+  void apply_cross_dedup(JobRecord& job, std::vector<StoredHash>& added);
+  void recover();
   void check_deadlines();
   void arm_timer();
   void begin_stop();
@@ -175,6 +186,8 @@ class Supervisor {
     std::vector<std::pair<uint64_t, int>> owners;  // (job id, asset index)
   };
   std::unordered_map<std::string, TenantIndex> tenant_hashes_;
+
+  std::unique_ptr<JobStore> store_;  // null unless cfg_.db is set
 };
 
 // Entry point for `mhprep worker`.

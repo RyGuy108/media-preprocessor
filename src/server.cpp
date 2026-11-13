@@ -70,9 +70,12 @@ HttpServer::HttpServer(Supervisor& sup) : sup_(sup), impl_(std::make_unique<Impl
     }
     json ids = json::array();
     for (auto& s : specs) {
-      auto id = sup_.submit(std::move(s));
+      std::string why;
+      auto id = sup_.submit(std::move(s), &why);
       if (!id) {
         res.set_header("Retry-After", "1");
+        if (why == "store")  // could not be made durable; nothing was recorded
+          return reply_json(res, 503, {{"error", "job store unavailable"}, {"accepted", ids}});
         return reply_json(res, 429, {{"error", "queue full or shutting down"}, {"accepted", ids}});
       }
       ids.push_back(*id);
@@ -123,6 +126,16 @@ HttpServer::HttpServer(Supervisor& sup) : sup_(sup), impl_(std::make_unique<Impl
     counter("mhprep_worker_spawns_total", s.worker_spawns, "Worker processes started");
     counter("mhprep_cross_job_duplicates_total", s.cross_job_duplicates,
             "Assets matching an earlier upload from the same tenant");
+    if (auto st = sup_.store_stats()) {
+      counter("mhprep_jobs_recovered_total", s.recovered, "Unfinished jobs resumed at startup");
+      counter("mhprep_store_rejects_total", s.store_rejects,
+              "Submits refused because the job could not be made durable");
+      counter("mhprep_store_transactions_total", st->transactions,
+              "Job store transactions (one per group commit)");
+      counter("mhprep_store_writes_total", st->writes, "Job store writes");
+      counter("mhprep_store_failed_transactions_total", st->failed_transactions,
+              "Job store transactions that failed and were retried");
+    }
     gauge("mhprep_queue_depth", s.queued);
     gauge("mhprep_jobs_running", s.running);
     gauge("mhprep_workers_alive", s.workers_alive);

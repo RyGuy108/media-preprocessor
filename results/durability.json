@@ -1,0 +1,15 @@
+{
+  "machine": "4 vCPU cloud VM, Postgres 16 on the same host, synchronous_commit=on",
+  "kill9_recovery": {
+    "submitted": 40, "succeeded_before_kill": 16, "running_at_kill": 4, "queued_at_kill": 20,
+    "orphaned_workers_after_kill": 0, "resumed_on_restart": 24, "succeeded_after_restart": 40
+  },
+  "submit_load": {
+    "tool": "wrk -t4 -c64 -d10s --latency -s bench/wrk_submit.lua",
+    "group_commit_pipelined": {"req_per_s": 5289.6, "p50_ms": 11.37, "p99_ms": 27.45,
+                               "transactions": 1737, "writes": 159264},
+    "group_commit_not_pipelined": {"req_per_s": 2235.4, "p50_ms": 26.73, "p99_ms": 51.37,
+                                   "transactions": 774, "writes": 67333},
+    "commit_per_write": {"req_per_s": 383.4, "p50_ms": 163.59, "p99_ms": 252.87}
+  }
+}
