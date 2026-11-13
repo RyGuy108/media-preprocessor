@@ -1,0 +1,120 @@
+{
+  "load": "wrk -t2 -cN -d20s -s bench/wrk_mix.lua (99.8% GET status, 0.2% POST image) while 4 workers decode a 144-video backlog; 4 vCPU",
+  "runs": [
+    {
+      "build": "before",
+      "connections": 64,
+      "listen_overflows": 5,
+      "req_per_s": 93850,
+      "p50_us": 359,
+      "p99_us": 2618,
+      "p999_us": 5131,
+      "max_us": 13363,
+      "errors": 0
+    },
+    {
+      "build": "after",
+      "connections": 64,
+      "listen_overflows": 0,
+      "req_per_s": 83458,
+      "p50_us": 347,
+      "p99_us": 5107,
+      "p999_us": 8453,
+      "max_us": 20225,
+      "errors": 0
+    },
+    {
+      "build": "before",
+      "connections": 72,
+      "listen_overflows": 83,
+      "req_per_s": 93567,
+      "p50_us": 362,
+      "p99_us": 553698,
+      "p999_us": 1450840,
+      "max_us": 1667274,
+      "errors": 24
+    },
+    {
+      "build": "after",
+      "connections": 72,
+      "listen_overflows": 0,
+      "req_per_s": 86143,
+      "p50_us": 413,
+      "p99_us": 3898,
+      "p999_us": 7656,
+      "max_us": 20433,
+      "errors": 0
+    },
+    {
+      "build": "before",
+      "connections": 256,
+      "listen_overflows": 153,
+      "req_per_s": 90998,
+      "p50_us": 376,
+      "p99_us": 1449,
+      "p999_us": 4311,
+      "max_us": 14777,
+      "errors": 156
+    },
+    {
+      "build": "after",
+      "connections": 256,
+      "listen_overflows": 0,
+      "req_per_s": 84299,
+      "p50_us": 1450,
+      "p99_us": 6162,
+      "p999_us": 19477,
+      "max_us": 59047,
+      "errors": 0
+    }
+  ],
+  "no_reconnect_control": {
+    "note": "keep_alive_max_count raised so wrk never reconnects; c64, no decode load",
+    "before": {
+      "req_per_s": [
+        94983,
+        96204
+      ],
+      "p99_us": [
+        714488,
+        712405
+      ],
+      "max_us": [
+        1692441,
+        1700518
+      ],
+      "errors": [
+        9,
+        3
+      ]
+    },
+    "after": {
+      "req_per_s": [
+        84801,
+        84001
+      ],
+      "p99_us": [
+        2758,
+        2928
+      ],
+      "max_us": [
+        15968,
+        9593
+      ],
+      "errors": [
+        0,
+        0
+      ]
+    }
+  },
+  "server_cpu_us_per_request_c64": {
+    "before": [
+      25.21,
+      25.27
+    ],
+    "after": [
+      29.33,
+      30.51
+    ]
+  }
+}
