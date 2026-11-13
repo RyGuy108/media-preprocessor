@@ -78,3 +78,6 @@ if(MHPREP_BUILD_TESTS)
   include(GoogleTest)
   gtest_discover_tests(mhprep_tests DISCOVERY_TIMEOUT 30)
 endif()
+
+add_executable(prune_bench bench/prune_bench.cpp)
+target_link_libraries(prune_bench PRIVATE mhprep_core)

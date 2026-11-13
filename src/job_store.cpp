@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS mhprep_jobs (
 -- Recovery scans only unfinished jobs; keep that cheap as the table grows.
 CREATE INDEX IF NOT EXISTS mhprep_jobs_unfinished
   ON mhprep_jobs (id) WHERE state IN ('queued', 'running');
+-- Retention deletes the oldest finished jobs first.
+CREATE INDEX IF NOT EXISTS mhprep_jobs_finished_at
+  ON mhprep_jobs (finished_at) WHERE state IN ('succeeded', 'failed');
 CREATE TABLE IF NOT EXISTS mhprep_asset_hashes (
   job_id bigint NOT NULL REFERENCES mhprep_jobs (id) ON DELETE CASCADE,
   asset  integer NOT NULL,
@@ -239,8 +242,59 @@ JobStore::~JobStore() {
     std::lock_guard lk(mu_);
     stop_ = true;
   }
+  maint_cv_.notify_all();
+  if (maint_.joinable()) maint_.join();
   work_cv_.notify_all();
   if (writer_.joinable()) writer_.join();
+}
+
+uint64_t JobStore::prune_with(Conn& c, std::chrono::seconds older_than, size_t batch) {
+  uint64_t total = 0;
+  for (;;) {
+    if ((!c.ok() && !c.connect())) break;
+    // Oldest first, a bounded batch per statement; hashes go with their job (CASCADE).
+    // The highest id is always kept: max_id() seeds the next id from it on restart, so
+    // deleting it could hand out an id (and output directory) that was already used.
+    auto r = c.exec(
+        "DELETE FROM mhprep_jobs WHERE id IN ("
+        "  SELECT id FROM mhprep_jobs"
+        "  WHERE state IN ('succeeded', 'failed')"
+        "    AND finished_at < now() - make_interval(secs => $1::float8)"
+        "    AND id < (SELECT max(id) FROM mhprep_jobs)"
+        "  ORDER BY finished_at LIMIT $2)",
+        {std::to_string(older_than.count()), std::to_string(batch)});
+    if (!r) {
+      std::fprintf(stderr, "mhprep: job store retention: %s", c.last_error.c_str());
+      break;
+    }
+    const uint64_t n = std::stoull(PQcmdTuples(r.get()));
+    total += n;
+    std::lock_guard lk(mu_);
+    stats_.pruned += n;
+    if (n < batch || stop_) break;
+  }
+  std::lock_guard lk(mu_);
+  ++stats_.prune_passes;
+  return total;
+}
+
+uint64_t JobStore::prune(std::chrono::seconds older_than, size_t batch) {
+  Conn c(conninfo_);
+  return prune_with(c, older_than, batch);
+}
+
+void JobStore::start_retention(Retention r) {
+  if (r.keep.count() <= 0 || maint_.joinable()) return;
+  maint_ = std::thread([this, r] {
+    Conn c(conninfo_);
+    std::unique_lock lk(mu_);
+    while (!stop_) {
+      lk.unlock();
+      prune_with(c, r.keep, r.batch);
+      lk.lock();
+      maint_cv_.wait_for(lk, r.every, [&] { return stop_; });
+    }
+  });
 }
 
 uint64_t JobStore::max_id() {
