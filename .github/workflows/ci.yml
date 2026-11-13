@@ -59,3 +59,20 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
           MHPREP_TEST_PG: host=localhost user=postgres password=postgres dbname=mhprep_test
         run: ctest --test-dir build --output-on-failure --timeout 300
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (compiles and runs the test suite in the build stage)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: mhprep:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the runtime image
+        run: scripts/docker_smoke.sh mhprep:ci
